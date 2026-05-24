@@ -1,9 +1,9 @@
 #!/bin/bash
 # ═══════════════════════════════════════════════════════════════
 #  RH PULSAR — Passive NDR Sensor Installer
-#  Version: 1.3.0
-#  Red Horizon Security — redhorizon.ph
-#  © 2026 Red Horizon Security. All rights reserved.
+#  Version: 1.0
+#  Red Horizon — redhorizon.ph
+#  © 2026 Red Horizon. All rights reserved.
 #
 #  Usage:
 #    sudo bash install.sh              # Full install
@@ -132,7 +132,7 @@ print_banner() {
     echo "  ╚═╝  ╚═╝╚═╝  ╚═╝    ╚═╝      ╚═════╝ ╚══════╝╚══════╝╚═╝  ╚═╝╚═╝  ╚═╝"
     echo -e "${NC}"
     echo -e "${WHITE}  Passive Network Detection & Response Platform${NC}"
-    echo -e "${GRAY}  Version ${PULSAR_VERSION} — Red Horizon Security — redhorizon.ph${NC}"
+    echo -e "${GRAY}  Version ${PULSAR_VERSION} — Red Horizon — redhorizon.ph${NC}"
     if [[ "$DRY_RUN" == true ]]; then
         echo ""
         echo -e "${CYAN}  ┌─────────────────────────────────────────┐${NC}"
@@ -1122,7 +1122,7 @@ LIMITS
     # Kernel tuning
     cat > /etc/sysctl.d/99-rh-pulsar.conf << SYSCTL
 # RH Pulsar — Kernel Tuning
-# Red Horizon Security — redhorizon.ph
+# Red Horizon — redhorizon.ph
 vm.max_map_count = 262144
 net.core.rmem_max = 134217728
 net.core.wmem_max = 134217728
@@ -1223,7 +1223,7 @@ deploy_scripts() {
     cat > "$ZEEK_SITE/c2beacon.zeek" << 'EOF'
 # RH Pulsar — C2 Beacon Detection
 # Rule 110001 — MITRE T1071
-# Red Horizon Security — redhorizon.ph
+# Red Horizon — redhorizon.ph
 module C2Beacon;
 export {
     redef enum Notice::Type += { C2_Beacon_Detected };
@@ -1257,7 +1257,7 @@ EOF
     cat > "$ZEEK_SITE/dnstunnel.zeek" << 'EOF'
 # RH Pulsar — DNS Tunnel Detection v5
 # Rule 110002 — MITRE T1071.004
-# Red Horizon Security — redhorizon.ph
+# Red Horizon — redhorizon.ph
 module DNSTunnel;
 export {
     redef enum Notice::Type += { DNS_Tunnel_Detected };
@@ -1315,7 +1315,7 @@ EOF
     cat > "$ZEEK_SITE/detect-ja4.zeek" << 'EOF'
 # RH Pulsar — JA4/JA4S TLS Fingerprint Detection
 # Rule 110003 — MITRE T1573
-# Red Horizon Security — redhorizon.ph
+# Red Horizon — redhorizon.ph
 module DetectJA4;
 export {
     redef enum Notice::Type += { Sliver_JA4_Detected };
@@ -1360,7 +1360,7 @@ EOF
     cat > "$ZEEK_SITE/http-c2.zeek" << 'EOF'
 # RH Pulsar — HTTP C2 & Suspicious UA Detection
 # Rules 110004/110005 — MITRE T1071.001
-# Red Horizon Security — redhorizon.ph
+# Red Horizon — redhorizon.ph
 module HTTPC2;
 export {
     redef enum Notice::Type += { HTTP_C2_Beacon, Suspicious_UserAgent };
@@ -1414,7 +1414,7 @@ configure_zeek() {
 
     cat > "$ZEEK_SITE/local.zeek" << LOCALZEEK
 # RH Pulsar — local.zeek v${PULSAR_VERSION}
-# Red Horizon Security — redhorizon.ph
+# Red Horizon — redhorizon.ph
 # Generated: $(date)
 
 @load base/protocols/conn
@@ -1776,8 +1776,8 @@ print_summary() {
     echo ""
     echo -e "${RED}  ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${NC}"
     echo ""
-    echo -e "${WHITE}  Red Horizon Security — redhorizon.ph${NC}"
-    echo -e "${GRAY}  © 2026 Red Horizon Security. All rights reserved.${NC}"
+    echo -e "${WHITE}  Red Horizon — redhorizon.ph${NC}"
+    echo -e "${GRAY}  © 2026 Red Horizon. All rights reserved.${NC}"
     echo ""
 }
 
