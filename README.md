@@ -1,5 +1,5 @@
 # rh-pulsar
-Passive NDR Sensor — Red Horizon Security
+Passive NDR Sensor — Red Horizon
 
 Detects C2 beaconing, DNS tunneling, TLS anomalies, and HTTP C2 in under 5 seconds. Zero agents. Zero network impact.
 
@@ -59,4 +59,4 @@ cat /var/log/rh-pulsar-install.log
 
 ---
 
-© 2026 Red Horizon Security — redhorizon.ph
+© 2026 Red Horizon — redhorizon.ph
