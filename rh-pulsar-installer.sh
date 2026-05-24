@@ -2,8 +2,8 @@
 # ═══════════════════════════════════════════════════════════
 #  RH PULSAR — Passive NDR Sensor Installer
 #  Version: 2.1.0
-#  Red Horizon Security — redhorizon.ph
-#  © 2026 Red Horizon Security. All rights reserved.
+#  Red Horizon — redhorizon.ph
+#  © 2026 Red Horizon. All rights reserved.
 #
 #  Usage:
 #    sudo bash install.sh            # Full install
@@ -81,7 +81,7 @@ banner() {
     echo "  ╚═╝  ╚═╝╚═╝  ╚═╝    ╚═╝      ╚═════╝ ╚══════╝╚══════╝╚═╝  ╚═╝╚═╝  ╚═╝"
     echo -e "${N}"
     echo -e "${W}  Passive NDR Platform — v${PULSAR_VER}${N}"
-    echo -e "${D}  Red Horizon Security — redhorizon.ph${N}"
+    echo -e "${D}  Red Horizon — redhorizon.ph${N}"
     [[ "$DRY_RUN" == true ]] && \
         echo -e "\n${C}  ┌─────────────────────────────────────┐${N}\n${C}  │  DRY RUN — no changes will be made  │${N}\n${C}  └─────────────────────────────────────┘${N}"
     echo ""
@@ -789,7 +789,7 @@ deploy_scripts() {
     cat > "$SITE/c2beacon.zeek" << 'EOF'
 # RH Pulsar — C2 Beacon Detection
 # Rule 110001 — MITRE T1071
-# Red Horizon Security — redhorizon.ph
+# Red Horizon — redhorizon.ph
 module C2Beacon;
 export {
     redef enum Notice::Type += { C2_Beacon_Detected };
@@ -824,7 +824,7 @@ EOF
     cat > "$SITE/dnstunnel.zeek" << 'EOF'
 # RH Pulsar — DNS Tunnel Detection v5
 # Rule 110002 — MITRE T1071.004
-# Red Horizon Security — redhorizon.ph
+# Red Horizon — redhorizon.ph
 module DNSTunnel;
 export {
     redef enum Notice::Type += { DNS_Tunnel_Detected };
@@ -883,7 +883,7 @@ EOF
     cat > "$SITE/detect-ja4.zeek" << 'EOF'
 # RH Pulsar — JA4/JA4S TLS Fingerprint Detection
 # Rule 110003 — MITRE T1573
-# Red Horizon Security — redhorizon.ph
+# Red Horizon — redhorizon.ph
 module DetectJA4;
 export {
     redef enum Notice::Type += { Sliver_JA4_Detected };
@@ -923,7 +923,7 @@ EOF
     cat > "$SITE/http-c2.zeek" << 'EOF'
 # RH Pulsar — HTTP C2 & Suspicious UA Detection
 # Rules 110004/110005 — MITRE T1071.001
-# Red Horizon Security — redhorizon.ph
+# Red Horizon — redhorizon.ph
 module HTTPC2;
 export {
     redef enum Notice::Type += { HTTP_C2_Beacon, Suspicious_UserAgent };
@@ -1289,8 +1289,8 @@ validate_and_summary() {
     echo ""
     echo -e "${R}  ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${N}"
     echo ""
-    echo -e "${W}  Red Horizon Security — redhorizon.ph${N}"
-    echo -e "${D}  © 2026 Red Horizon Security. All rights reserved.${N}"
+    echo -e "${W}  Red Horizon — redhorizon.ph${N}"
+    echo -e "${D}  © 2026 Red Horizon. All rights reserved.${N}"
     echo ""
 }
 
