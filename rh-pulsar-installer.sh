@@ -17,6 +17,9 @@ DRY_RUN=false
 [[ "${1:-}" == "--dry-run" ]] && DRY_RUN=true
 [[ "${1:-}" == "--help"    ]] && { echo "Usage: sudo bash install.sh [--dry-run]"; exit 0; }
 
+# Stop spinner on any exit
+trap 'spinner_stop 2>/dev/null || true' EXIT INT TERM
+
 # ── Colors ──────────────────────────────────────────────────
 R='\033[0;31m' G='\033[0;32m' Y='\033[1;33m'
 W='\033[1;37m' D='\033[0;37m' C='\033[0;36m'
@@ -26,7 +29,7 @@ B='\033[0;34m' M='\033[0;35m' N='\033[0m'
 ZEEK_VER="8.2.0"
 WAZUH_VER="4.14.5"
 JA4_VER="0.18.8"
-PULSAR_VER="2.1.0"
+PULSAR_VER="2.2.0"
 
 # ── State ───────────────────────────────────────────────────
 LOG="/var/log/rh-pulsar-install.log"
@@ -55,17 +58,67 @@ info() { echo -e "${D}  [→]${N} $1"; }
 has()  { command -v "$1" &>/dev/null; }
 
 # ── Progress bar ────────────────────────────────────────────
+# ── Spinner (runs in background during long operations) ─────
+SPINNER_PID=""
+spinner_start() {
+    local msg="${1:-Working...}"
+    local frames=('⠋' '⠙' '⠹' '⠸' '⠼' '⠴' '⠦' '⠧' '⠇' '⠏')
+    (
+        local i=0
+        while true; do
+            printf "\r  ${C}%s${N} %s " "${frames[$((i % 10))]}" "$msg"
+            ((i++)) || true
+            sleep 0.1
+        done
+    ) &
+    SPINNER_PID=$!
+    disown "$SPINNER_PID" 2>/dev/null || true
+}
+
+spinner_stop() {
+    if [[ -n "${SPINNER_PID:-}" ]]; then
+        kill "$SPINNER_PID" 2>/dev/null || true
+        wait "$SPINNER_PID" 2>/dev/null || true
+        SPINNER_PID=""
+        printf "\r\033[K"
+    fi
+}
+
+# ── Animated progress bar ────────────────────────────────────
 progress() {
+    spinner_stop
     ((CURRENT_STEP++)) || true
-    local pct=$(( CURRENT_STEP * 100 / TOTAL_STEPS ))
-    local filled=$(( pct / 5 ))
+    local target_pct=$(( CURRENT_STEP * 100 / TOTAL_STEPS ))
+    local prev_pct=$(( (CURRENT_STEP - 1) * 100 / TOTAL_STEPS ))
+
+    echo ""
+    echo -e "${R}  ── PHASE ${CURRENT_STEP}/${TOTAL_STEPS} — $1${N}"
+
+    # Animate from previous % to current %
+    local pct=$prev_pct
+    while [[ "$pct" -le "$target_pct" ]]; do
+        local filled=$(( pct / 5 ))
+        local empty=$(( 20 - filled ))
+        local bar=""
+        for ((i=0; i<filled; i++)); do bar+="█"; done
+        for ((i=0; i<empty;  i++)); do bar+="░"; done
+
+        if   [[ "$pct" -lt 40 ]]; then local col="${G}"
+        elif [[ "$pct" -lt 75 ]]; then local col="${Y}"
+        else                            local col="${R}"; fi
+
+        printf "\r  ${D}[${col}%s${D}]${N} ${W}%d%%${N}  " "$bar" "$pct"
+        ((pct+=2)) || true
+        sleep 0.03
+    done
+
+    # Final state
+    local filled=$(( target_pct / 5 ))
     local empty=$(( 20 - filled ))
     local bar=""
     for ((i=0; i<filled; i++)); do bar+="█"; done
     for ((i=0; i<empty;  i++)); do bar+="░"; done
-    echo ""
-    echo -e "${R}  ── PHASE ${CURRENT_STEP}/${TOTAL_STEPS} — $1${N}"
-    echo -e "  ${D}[${G}${bar}${D}] ${pct}%${N}"
+    printf "\r  ${D}[${G}%s${D}]${N} ${W}%d%%${N} ${G}✓${N}\n" "$bar" "$target_pct"
     echo ""
 }
 
@@ -633,6 +686,7 @@ prep_system() {
 
     # ── Packages per OS ─────────────────────────────────────
     info "Installing packages..."
+    spinner_start "Installing packages (this may take a minute)..."
     case $PKG_MGR in
         apt)
             apt-get install -y \
@@ -654,6 +708,7 @@ prep_system() {
                 >> "$LOG" 2>&1
             ;;
     esac
+    spinner_stop
     ok "Packages installed"
 
     # ── NIC offload ─────────────────────────────────────────
@@ -733,14 +788,18 @@ install_zeek() {
                 | gpg --dearmor \
                 | tee /etc/apt/trusted.gpg.d/security_zeek.gpg > /dev/null 2>&1
             apt-get update -qq >> "$LOG" 2>&1
+            spinner_start "Installing Zeek ${ZEEK_VER} — this takes 2-3 minutes..."
             apt-get install -y zeek >> "$LOG" 2>&1
+            spinner_stop
             ;;
         yum|dnf)
             info "Adding Zeek repository (RPM)..."
             local rpm_repo="https://download.opensuse.org/repositories/security:/zeek/CentOS_8/security:zeek.repo"
             $PKG_MGR install -y "$rpm_repo" >> "$LOG" 2>&1 || \
                 curl -fsSL "$rpm_repo" -o /etc/yum.repos.d/zeek.repo >> "$LOG" 2>&1
+            spinner_start "Installing Zeek ${ZEEK_VER}..."
             $PKG_MGR install -y zeek >> "$LOG" 2>&1
+            spinner_stop
             ;;
     esac
 
@@ -762,13 +821,16 @@ install_ja4() {
     fi
 
     info "Installing zkg..."
+    spinner_start "Installing zkg package manager..."
     pip3 install zkg --break-system-packages --ignore-installed GitPython >> "$LOG" 2>&1
+    spinner_stop
 
     info "Configuring zkg..."
     /opt/zeek/bin/zkg autoconfig >> "$LOG" 2>&1
 
-    info "Installing JA4+ package..."
+    spinner_start "Installing JA4+ v${JA4_VER}..."
     /opt/zeek/bin/zkg install --force foxio/ja4 >> "$LOG" 2>&1
+    spinner_stop
     ok "JA4+ v${JA4_VER} installed"
 
     # Silence websockets warning
@@ -830,8 +892,10 @@ export {
     redef enum Notice::Type += { DNS_Tunnel_Detected };
     global suspicious_threshold: count = 100;
     global long_sub_threshold: count = 5;
-    global long_sub_len: count = 40;
+    global long_sub_len: count = 20;
     global suppress_for: interval = 1hr;
+    # TXT=16 MX=15 AAAA=28 ANY=255 NULL=0 — classic tunnel types
+    # A=1 also included for high-volume long subdomain detection
     global suspicious_qtypes: set[count] = { 16, 15, 28, 255, 0 };
 }
 global dns_tracker: table[addr, string] of count &create_expire=1hr;
@@ -849,26 +913,29 @@ event dns_request(c: connection, msg: dns_msg, query: string,
     local src = c$id$orig_h;
     local dst = c$id$resp_h;
     local root = get_root_domain(query);
+    # Classic tunnel record types — fire on volume threshold
     if (qtype in suspicious_qtypes) {
         if ([src, root] !in dns_tracker) dns_tracker[src, root] = 0;
         dns_tracker[src, root] += 1;
         if (dns_tracker[src, root] == suspicious_threshold) {
             NOTICE([$note=DNS_Tunnel_Detected,
-                    $msg=fmt("DNS Tunnel: %s querying %s (%d queries) via %s",
-                             src, root, dns_tracker[src, root], dst),
+                    $msg=fmt("DNS Tunnel: %s querying %s (%d queries, type=%d) via %s",
+                             src, root, dns_tracker[src, root], qtype, dst),
                     $src=src, $dst=dst, $conn=c,
                     $suppress_for=suppress_for,
                     $identifier=fmt("%s-%s", src, root)]);
         }
     }
+    # Long subdomain — fires on any query type including A
+    # Catches DGA and DNS tunnel tools regardless of record type
     local parts = split_string(query, /\./);
     if (|parts| > 2 && |parts[0]| > long_sub_len) {
         if ([src, root] !in long_sub_tracker) long_sub_tracker[src, root] = 0;
         long_sub_tracker[src, root] += 1;
         if (long_sub_tracker[src, root] == long_sub_threshold) {
             NOTICE([$note=DNS_Tunnel_Detected,
-                    $msg=fmt("DNS Tunnel (Long Sub): %s -> %s len=%d via %s",
-                             src, root, |parts[0]|, dst),
+                    $msg=fmt("DNS Tunnel (Long Subdomain): %s -> %s subdomain_len=%d type=%d via %s",
+                             src, root, |parts[0]|, qtype, dst),
                     $src=src, $dst=dst, $conn=c,
                     $suppress_for=suppress_for,
                     $identifier=fmt("longsub-%s-%s", src, root)]);
@@ -924,6 +991,11 @@ EOF
 # RH Pulsar — HTTP C2 & Suspicious UA Detection
 # Rules 110004/110005 — MITRE T1071.001
 # Red Horizon — redhorizon.ph
+#
+# Uses http_message_done at priority -5 to ensure full HTTP
+# context (including User-Agent) is available before detection.
+# This fixes the timing issue where http_request fires before
+# headers are fully parsed by the HTTP analyzer.
 module HTTPC2;
 export {
     redef enum Notice::Type += { HTTP_C2_Beacon, Suspicious_UserAgent };
@@ -931,40 +1003,58 @@ export {
     global suppress_for: interval = 1hr;
 }
 global http_beacon_tracker: table[addr, string] of count &create_expire=1hr;
+
 function is_sus_ua(ua: string): bool {
     if (/python-requests/ in ua) return T;
     if (/Go-http-client/  in ua) return T;
     if (/libwww-perl/     in ua) return T;
-    if (/Sliver/          in ua) return T;
-    if (/Havoc/           in ua) return T;
+    if (/[Ss]liver/       in ua) return T;
+    if (/[Hh]avoc/        in ua) return T;
     if (/CobaltStrike/    in ua) return T;
     if (/meterpreter/     in ua) return T;
     if (/curl\//          in ua) return T;
     return F;
 }
-event http_request(c: connection, method: string, original_URI: string,
-                   unescaped_URI: string, version: string) &priority=5 {
+
+# Fires after full HTTP request is parsed — ensures UA is available
+event http_message_done(c: connection, is_orig: bool,
+                        stat: http_message_stat) &priority=-5 {
+    if (!is_orig) return;
+    if (!c?$http) return;
+
     local src = c$id$orig_h;
     local dst = c$id$resp_h;
-    local ua = (c?$http && c$http?$user_agent) ? c$http$user_agent : "";
+    local ua  = c$http?$user_agent ? c$http$user_agent : "";
+    local uri = c$http?$uri ? c$http$uri : "";
+
+    # Rule 110005 — Suspicious User-Agent
     if (ua != "" && is_sus_ua(ua)) {
-        NOTICE([$note=Suspicious_UserAgent,
-                $msg=fmt("Suspicious UA: %s -> %s UA=%s", src, dst, ua),
-                $src=src, $dst=dst, $conn=c,
-                $suppress_for=suppress_for,
-                $identifier=fmt("ua-%s-%s", src, ua)]);
+        NOTICE([$note         = Suspicious_UserAgent,
+                $msg          = fmt("Suspicious UA: %s -> %s UA=%s", src, dst, ua),
+                $src          = src,
+                $dst          = dst,
+                $conn         = c,
+                $suppress_for = suppress_for,
+                $identifier   = fmt("ua-%s-%s", src, ua)]);
     }
-    if ([src, original_URI] !in http_beacon_tracker)
-        http_beacon_tracker[src, original_URI] = 0;
-    http_beacon_tracker[src, original_URI] += 1;
-    if (http_beacon_tracker[src, original_URI] == beacon_threshold) {
-        NOTICE([$note=HTTP_C2_Beacon,
-                $msg=fmt("HTTP C2 Beacon: %s -> %s URI=%s count=%d",
-                         src, dst, original_URI,
-                         http_beacon_tracker[src, original_URI]),
-                $src=src, $dst=dst, $conn=c,
-                $suppress_for=suppress_for,
-                $identifier=fmt("beacon-%s-%s", src, original_URI)]);
+
+    # Rule 110004 — HTTP C2 Beacon (URI repetition)
+    if (uri != "") {
+        if ([src, uri] !in http_beacon_tracker)
+            http_beacon_tracker[src, uri] = 0;
+        http_beacon_tracker[src, uri] += 1;
+
+        if (http_beacon_tracker[src, uri] == beacon_threshold) {
+            NOTICE([$note         = HTTP_C2_Beacon,
+                    $msg          = fmt("HTTP C2 Beacon: %s -> %s URI=%s count=%d",
+                                        src, dst, uri,
+                                        http_beacon_tracker[src, uri]),
+                    $src          = src,
+                    $dst          = dst,
+                    $conn         = c,
+                    $suppress_for = suppress_for,
+                    $identifier   = fmt("beacon-%s-%s", src, uri)]);
+        }
     }
 }
 EOF
@@ -1020,14 +1110,23 @@ EOF
     ok "networks.cfg: $mgmt_ip"
 
     # Capture interface setup
-    ip link set "$CAP_IFACE" up
-    ip link set "$CAP_IFACE" promisc on
-    ip addr flush dev "$CAP_IFACE" 2>/dev/null || true
-    ethtool -K "$CAP_IFACE" gro off lro off 2>/dev/null || true
-    ok "$CAP_IFACE — up, promiscuous, no IP, offload off"
+    # SAFETY: never flush management interface — would kill SSH
+    if [[ "$CAP_IFACE" == "$MGMT_IFACE" ]]; then
+        warn "$CAP_IFACE is management interface — skipping IP flush to preserve SSH"
+        ip link set "$CAP_IFACE" promisc on
+        ethtool -K "$CAP_IFACE" gro off lro off 2>/dev/null || true
+        ok "$CAP_IFACE — promiscuous, offload off (IP preserved — same as mgmt)"
+    else
+        ip link set "$CAP_IFACE" up
+        ip link set "$CAP_IFACE" promisc on
+        ip addr flush dev "$CAP_IFACE" 2>/dev/null || true
+        ethtool -K "$CAP_IFACE" gro off lro off 2>/dev/null || true
+        ok "$CAP_IFACE — up, promiscuous, no IP, offload off"
+    fi
 
-    # Persist across reboots
-    cat > /etc/systemd/system/rh-pulsar-iface.service << EOF
+    # Persist across reboots — only if dedicated capture interface
+    if [[ "$CAP_IFACE" != "$MGMT_IFACE" ]]; then
+        cat > /etc/systemd/system/rh-pulsar-iface.service << EOF
 [Unit]
 Description=RH Pulsar capture interface setup
 After=network.target
@@ -1041,8 +1140,11 @@ RemainAfterExit=yes
 [Install]
 WantedBy=multi-user.target
 EOF
-    systemctl enable rh-pulsar-iface.service >> "$LOG" 2>&1
-    ok "Interface config persisted across reboots"
+        systemctl enable rh-pulsar-iface.service >> "$LOG" 2>&1
+        ok "Interface config persisted across reboots"
+    else
+        ok "Single NIC mode — interface persistence skipped"
+    fi
 }
 
 # ═══════════════════════════════════════════════════════════
@@ -1191,8 +1293,9 @@ EOF
 start_services() {
     progress "STARTING SERVICES"
 
-    info "Deploying Zeek..."
+    spinner_start "Deploying Zeek sensor..."
     /opt/zeek/bin/zeekctl deploy >> "$LOG" 2>&1
+    spinner_stop
     ok "Zeek deployed"
 
     # Watchdog cron — no duplicates
