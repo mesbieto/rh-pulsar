@@ -469,9 +469,8 @@ pf_ports() {
     for port in "${!ports[@]}"; do
         local desc="${ports[$port]}"
         local in_use_tcp in_use_udp
-        # FIXED
-        in_use_tcp=$(ss -tlnp 2>/dev/null | grep -c ":${port} " 2>/dev/null | tr -d '[:space:]' || echo "0")
-        in_use_udp=$(ss -ulnp 2>/dev/null | grep -c ":${port} " 2>/dev/null | tr -d '[:space:]' || echo "0")
+        in_use_tcp=$(ss -tlnp 2>/dev/null | grep -c ":${port} " || echo "0")
+        in_use_udp=$(ss -ulnp 2>/dev/null | grep -c ":${port} " || echo "0")
 
         if [[ "$in_use_tcp" -gt 0 || "$in_use_udp" -gt 0 ]]; then
             local proc
@@ -923,25 +922,25 @@ preflight_summary() {
         echo -e "${RED}  [!] ${PF_CONFLICTS} conflict(s) detected.${NC}"
         echo -e "${YELLOW}  These may cause installation failure.${NC}"
         echo ""
-        read -p "  Continue despite conflicts? (y/N): " FORCE
-        [[ "$FORCE" != "y" && "$FORCE" != "Y" ]] && {
+        read -p "  Continue despite conflicts? (y/N): " FORCE || true
+        if [[ "$FORCE" != "y" && "$FORCE" != "Y" ]]; then
             echo ""
             echo -e "${GRAY}  Aborted. Fix conflicts and retry.${NC}"
-            echo -e "${GRAY}  Run: sudo bash install.sh --dry-run${NC}"
+            echo -e "${GRAY}  Run: sudo bash rh-pulsar-installer.sh --dry-run${NC}"
             exit 1
-        }
+        fi
     elif [[ "$PF_WARNINGS" -gt 0 ]]; then
         echo -e "${YELLOW}  [!] ${PF_WARNINGS} warning(s) — will be handled automatically.${NC}"
         echo ""
-        read -p "  Continue with installation? (Y/n): " CONT
+        read -p "  Continue with installation? (Y/n): " CONT || true
         CONT=${CONT:-Y}
-        [[ "$CONT" != "y" && "$CONT" != "Y" ]] && exit 1
+        if [[ "$CONT" != "y" && "$CONT" != "Y" ]]; then exit 1; fi
     else
         echo -e "${GREEN}  [✓] All checks passed. System is ready.${NC}"
         echo ""
-        read -p "  Continue with installation? (Y/n): " CONT
+        read -p "  Continue with installation? (Y/n): " CONT || true
         CONT=${CONT:-Y}
-        [[ "$CONT" != "y" && "$CONT" != "Y" ]] && exit 1
+        if [[ "$CONT" != "y" && "$CONT" != "Y" ]]; then exit 1; fi
     fi
 }
 
@@ -1085,8 +1084,8 @@ collect_config() {
     [[ "$SIEM_CHOICE" != "7" ]] && echo -e "  SIEM Host    : ${WHITE}$SIEM_HOST${NC}"
     echo -e "${GRAY}  ─────────────────────────────────────${NC}"
     echo ""
-    read -p "  Confirm and proceed? (y/N): " CONFIRM
-    [[ "$CONFIRM" != "y" && "$CONFIRM" != "Y" ]] && exit 1
+    read -p "  Confirm and proceed? (y/N): " CONFIRM || true
+    if [[ "$CONFIRM" != "y" && "$CONFIRM" != "Y" ]]; then exit 1; fi
 }
 
 # ─────────────────────────────────────────────────────────────
