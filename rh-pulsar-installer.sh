@@ -469,8 +469,9 @@ pf_ports() {
     for port in "${!ports[@]}"; do
         local desc="${ports[$port]}"
         local in_use_tcp in_use_udp
-        in_use_tcp=$(ss -tlnp 2>/dev/null | grep -c ":${port} " || echo "0")
-        in_use_udp=$(ss -ulnp 2>/dev/null | grep -c ":${port} " || echo "0")
+        # FIXED
+        in_use_tcp=$(ss -tlnp 2>/dev/null | grep -c ":${port} " 2>/dev/null | tr -d '[:space:]' || echo "0")
+        in_use_udp=$(ss -ulnp 2>/dev/null | grep -c ":${port} " 2>/dev/null | tr -d '[:space:]' || echo "0")
 
         if [[ "$in_use_tcp" -gt 0 || "$in_use_udp" -gt 0 ]]; then
             local proc
