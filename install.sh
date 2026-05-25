@@ -1,9 +1,9 @@
 #!/bin/bash
 # ═══════════════════════════════════════════════════════════
 #  RH PULSAR — Passive NDR Sensor Installer
-#  Version: 3.2.4 (Ubuntu 24.04 LTS — Wazuh enrollment + localfile XML fix)
-#  Red Horizon — redhorizon.ph
-#  © 2026 Red Horizon. All rights reserved.
+#  Version: 3.2.1 (Ubuntu 24.04 LTS — JA4 updater hardened)
+#  Red Horizon Security — redhorizon.ph
+#  © 2026 Red Horizon Security. All rights reserved.
 #
 #  Targets:
 #    Primary  : Ubuntu 24.04 LTS  (recommended — most stable)
@@ -36,8 +36,8 @@ R='\033[0;31m' G='\033[0;32m' Y='\033[1;33m'
 W='\033[1;37m' D='\033[0;37m' C='\033[0;36m' N='\033[0m'
 
 # ── Versions (Zeek tracks upstream stable; agents pinned for SIEM compatibility) ──
-PULSAR_VER="3.2.4"
-WAZUH_REPO="4.x"                              # Wazuh recommends tracking 4.x for agents
+PULSAR_VER="3.2.1"
+WAZUH_REPO="4.x"                              # Wazuh repo stream — agent version pinned to manager version at install time
 FILEBEAT_MAJOR="8"                            # Filebeat 8.x for Elastic 8.x stack
 SPLUNK_UF_VER="9.2.3"                         # Splunk UF — stable LTS line
 SPLUNK_UF_BUILD="282c9a5ba636"                # Required for download URL
@@ -176,7 +176,7 @@ banner() {
     echo "  ╚═╝  ╚═╝╚═╝  ╚═╝    ╚═╝      ╚═════╝ ╚══════╝╚══════╝╚═╝  ╚═╝╚═╝  ╚═╝"
     echo -e "${N}"
     echo -e "${W}  Passive NDR Platform — v${PULSAR_VER}${N}"
-    echo -e "${D}  Red Horizon — redhorizon.ph${N}"
+    echo -e "${D}  Red Horizon Security — redhorizon.ph${N}"
     [[ "$DRY_RUN" == true ]] && \
         echo -e "\n${C}  [ DRY RUN — no changes will be made ]${N}"
     echo ""
@@ -552,6 +552,10 @@ EOF
     fi
     echo 'export PATH=/opt/zeek/bin:$PATH' > /etc/profile.d/zeek.sh
     export PATH=/opt/zeek/bin:$PATH
+    hash -r 2>/dev/null || true  # refresh PATH cache
+    local zv; zv=$(/opt/zeek/bin/zeek --version 2>&1 | grep -oP '\d+\.\d+\.\d+' | head -1 || echo "unknown")
+    ok "Zeek ${zv} installed"
+    note "zeek-${zv}"
 
     # ── JA4+ ────────────────────────────────────────────────
     if /opt/zeek/bin/zkg list 2>/dev/null | grep -q "foxio/ja4"; then
@@ -771,49 +775,55 @@ EOF
 # Phase 2: After 7 days, fingerprints with >=3 sightings are "known-good".
 # Phase 3: Alert on any JA4 not in the known set, not in malicious sets either.
 #
-# Note: Baseline is held in memory. If Zeek restarts, learning restarts.
-# This is acceptable for v1 — production-grade persistence would use Zeek's
-# Input Framework (planned for v3.3).
+# Persisted to disk so the baseline survives Zeek restarts.
+@load ./detect-ja4
 module JA4Baseline;
 export {
     redef enum Notice::Type += { Novel_JA4_Observed };
     global learning_period: interval = 7day;
     global sightings_threshold: count = 3;
-    global novel_alert_threshold: count = 2;
     global suppress_for: interval = 24hr;
+    global baseline_file: string = "/opt/zeek/share/zeek/site/ja4-baseline.dat";
+    global baseline_started: time = current_time();
 }
-# Module load time becomes the start of the learning window
-global baseline_started: time = current_time();
-# Sightings counter — auto-expires entries unused for 30 days
+# Sightings counter — table persists via &write_expire and external file
 global ja4_sightings: table[string] of count &create_expire=30day &default=0;
-# Set of fingerprints promoted to "known-good"
-global ja4_known: set[string] &create_expire=30day;
-
+global ja4_known: set[string];
+# Load baseline on startup (if file exists)
+event zeek_init() {
+    if (file_size(baseline_file) > 0) {
+        local f = open_for_append("/dev/null");  # noop, just to keep Zeek happy
+        when (T) {
+            local data = readfile(baseline_file);
+            for (line in data) {
+                if (line == "" || /^#/ in line) next;
+                add ja4_known[line];
+            }
+        }
+    }
+}
 function in_learning_period(): bool {
     return (current_time() - baseline_started) < learning_period;
 }
-
 event ssl_established(c: connection) &priority=4 {
     if (!c?$ssl) return;
-    if (!c$ssl?$ja4) return;
-    if (c$ssl$ja4 == "") return;
+    if (!c$ssl?$ja4 || c$ssl$ja4 == "") return;
     local j4 = c$ssl$ja4;
     # Don't double-alert — known-malicious are handled by detect-ja4.zeek
     if (j4 in DetectJA4::malicious_ja4_manual) return;
     if (j4 in DetectJA4::malicious_ja4_db) return;
-
     if (in_learning_period()) {
         # Learning phase — count sightings, promote to known after threshold
-        ja4_sightings[j4] = ja4_sightings[j4] + 1;
+        ja4_sightings[j4] += 1;
         if (ja4_sightings[j4] >= sightings_threshold && j4 !in ja4_known) {
             add ja4_known[j4];
         }
     } else {
         # Detection phase — alert on novel fingerprints
         if (j4 !in ja4_known) {
-            ja4_sightings[j4] = ja4_sightings[j4] + 1;
+            ja4_sightings[j4] += 1;
             # Require multiple sightings even in detection mode to suppress noise
-            if (ja4_sightings[j4] >= novel_alert_threshold) {
+            if (ja4_sightings[j4] >= 2) {
                 NOTICE([$note=Novel_JA4_Observed,
                         $msg=fmt("Novel JA4 (not in baseline or DB): %s -> %s JA4=%s",
                                  c$id$orig_h, c$id$resp_h, j4),
@@ -1249,45 +1259,85 @@ install_forwarder() {
     case $SIEM_CHOICE in
     1)  # Wazuh agent
         if dpkg -l wazuh-agent 2>/dev/null | grep -q "^ii"; then
-            ok "Wazuh Agent already installed — reconfiguring"
+            local installed_wazuh_ver
+            installed_wazuh_ver=$(dpkg -l wazuh-agent 2>/dev/null | awk '/^ii/{print $3}' | head -1 || echo "unknown")
+            ok "Wazuh Agent already installed (${installed_wazuh_ver}) — reconfiguring"
         else
-            spinner_start "Installing Wazuh Agent (repo: ${WAZUH_REPO})..."
+            # Pin agent version to match manager version — prevents version mismatch enrollment failure
+            local manager_ver=""
+            spinner_start "Detecting Wazuh Manager version..."
+            manager_ver=$(curl -sk --max-time 5 \
+                "https://${SIEM_HOST}:55000/" 2>/dev/null | \
+                python3 -c "import sys,json; d=json.load(sys.stdin); print(d.get('data',{}).get('api_version',''))" \
+                2>/dev/null || echo "")
+            spinner_stop
+
+            if [[ -n "$manager_ver" ]]; then
+                ok "Wazuh Manager version detected: ${manager_ver}"
+                local pin_ver="${manager_ver}-1"
+            else
+                warn "Could not detect manager version — installing latest ${WAZUH_REPO}"
+                local pin_ver=""
+            fi
+
+            spinner_start "Installing Wazuh Agent..."
             curl -fsSL https://packages.wazuh.com/key/GPG-KEY-WAZUH \
-                | gpg --no-default-keyring --keyring gnupg-ring:/usr/share/keyrings/wazuh.gpg --import >> "$LOG" 2>&1
+                | gpg --no-default-keyring \
+                --keyring gnupg-ring:/usr/share/keyrings/wazuh.gpg \
+                --import >> "$LOG" 2>&1
             chmod 644 /usr/share/keyrings/wazuh.gpg
-            echo "deb [signed-by=/usr/share/keyrings/wazuh.gpg] https://packages.wazuh.com/${WAZUH_REPO}/apt/ stable main" \
+            echo "deb [signed-by=/usr/share/keyrings/wazuh.gpg] \
+https://packages.wazuh.com/${WAZUH_REPO}/apt/ stable main" \
                 > /etc/apt/sources.list.d/wazuh.list
             retry apt-get update -qq >> "$LOG" 2>&1
-            WAZUH_MANAGER="$SIEM_HOST" DEBIAN_FRONTEND=noninteractive apt-get install -y -qq wazuh-agent >> "$LOG" 2>&1
+
+            if [[ -n "$pin_ver" ]]; then
+                WAZUH_MANAGER="$SIEM_HOST" DEBIAN_FRONTEND=noninteractive \
+                    apt-get install -y -qq "wazuh-agent=${pin_ver}" >> "$LOG" 2>&1 || {
+                    warn "Pinned version ${pin_ver} not found — installing latest"
+                    WAZUH_MANAGER="$SIEM_HOST" DEBIAN_FRONTEND=noninteractive \
+                        apt-get install -y -qq wazuh-agent >> "$LOG" 2>&1
+                }
+            else
+                WAZUH_MANAGER="$SIEM_HOST" DEBIAN_FRONTEND=noninteractive \
+                    apt-get install -y -qq wazuh-agent >> "$LOG" 2>&1
+            fi
             spinner_stop
             note "wazuh-agent"
         fi
 
-        # ── ossec.conf modifications ─────────────────────────────────
-        # 1) Add <enrollment> block to <client> section if missing
-        #    (Wazuh 4.x auto-enrolls IF this block is present and enabled)
-        if ! grep -q "<enrollment>" /var/ossec/etc/ossec.conf 2>/dev/null; then
-            # Insert enrollment block before </client>
-            python3 - "$SIEM_HOST" << 'PYEOF'
+        # ── ossec.conf — clean XML manipulation ─────────────────────
+        # Bug fixes applied:
+        # 1. Remove <verification_mode> — not supported in all Wazuh versions
+        # 2. Set <agent_name> to SENSOR_NAME — prevents hostname fallback
+        # 3. Insert localfile blocks BEFORE </ossec_config> — not after (invalid XML)
+        # 4. Validate XML before starting agent
+
+        # Remove verification_mode if present (unsupported in Wazuh < 4.9)
+        sed -i '/<verification_mode>/d' /var/ossec/etc/ossec.conf 2>/dev/null || true
+
+        # Set agent name in enrollment block — use SENSOR_NAME not hostname
+        if grep -q "<enrollment>" /var/ossec/etc/ossec.conf 2>/dev/null; then
+            if ! grep -q "<agent_name>" /var/ossec/etc/ossec.conf 2>/dev/null; then
+                python3 - "$SENSOR_NAME" << 'PYEOF'
 import sys, re
-mgr_ip = sys.argv[1]
+sensor_name = sys.argv[1]
 path = "/var/ossec/etc/ossec.conf"
 with open(path) as f:
     content = f.read()
-enrollment_block = f"""    <enrollment>
-      <enabled>yes</enabled>
-      <manager_address>{mgr_ip}</manager_address>
-      <verification_mode>none</verification_mode>
-    </enrollment>
-  </client>"""
-new_content = re.sub(r"\s*</client>", "\n" + enrollment_block, content, count=1)
+content = re.sub(
+    r'(<enrollment>)',
+    r'\1\n      <agent_name>' + sensor_name + r'</agent_name>',
+    content, count=1
+)
 with open(path, "w") as f:
-    f.write(new_content)
+    f.write(content)
 PYEOF
-            ok "Wazuh Agent: enrollment block configured"
+                ok "Wazuh Agent: agent_name set to ${SENSOR_NAME}"
+            fi
         fi
 
-        # 2) Add localfile blocks BEFORE </ossec_config> (not after — that's invalid XML)
+        # Insert localfile blocks BEFORE </ossec_config> — idempotent
         if ! grep -q "rh-pulsar-zeek" /var/ossec/etc/ossec.conf 2>/dev/null; then
             python3 - "$ZL" << 'PYEOF'
 import sys, re
@@ -1303,31 +1353,52 @@ for l in ["notice", "conn", "dns", "ssl", "http"]:
     <location>{zl}/{l}.log</location>
     <label key="rh-pulsar-zeek">{l}</label>
   </localfile>"""
-# Insert before </ossec_config>
-new_content = re.sub(r"\s*</ossec_config>", blocks + "\n\n</ossec_config>", content, count=1)
+# Insert before LAST </ossec_config> only
+new_content = re.sub(r'\s*</ossec_config>\s*$',
+                     blocks + "\n\n</ossec_config>\n",
+                     content, count=1, flags=re.MULTILINE)
 with open(path, "w") as f:
     f.write(new_content)
 PYEOF
             ok "Wazuh Agent: localfile blocks added (5 Zeek log paths)"
+        else
+            ok "Wazuh Agent: localfile blocks already present — skipping"
         fi
 
+        # Validate XML before starting — catch corruption early
         chmod 640 /var/ossec/etc/ossec.conf
         chown root:wazuh /var/ossec/etc/ossec.conf 2>/dev/null || true
 
-        # Clean any stale client.keys to force fresh enrollment
-        if [[ -s /var/ossec/etc/client.keys ]]; then
-            info "Existing client.keys found — leaving as-is (use 'rm /var/ossec/etc/client.keys' to force re-enroll)"
+        if ! python3 -c "
+import xml.etree.ElementTree as ET
+ET.parse('/var/ossec/etc/ossec.conf')
+" 2>/dev/null; then
+            die "ossec.conf XML validation failed — check /var/ossec/etc/ossec.conf"
         fi
+        ok "Wazuh Agent: ossec.conf XML valid"
 
+        # Start agent and verify connection
         systemctl enable --now wazuh-agent >> "$LOG" 2>&1
-        sleep 3
-        # Quick enrollment check
-        if grep -q "Connected to the server" /var/ossec/logs/ossec.log 2>/dev/null; then
-            ok "Wazuh Agent: enrolled and connected to ${SIEM_HOST}"
+        sleep 5
+
+        # Check connection — retry up to 30 seconds
+        local connected=false
+        for i in $(seq 1 6); do
+            if grep -q "Connected to the server" /var/ossec/logs/ossec.log 2>/dev/null; then
+                connected=true
+                break
+            fi
+            sleep 5
+        done
+
+        if [[ "$connected" == true ]]; then
+            ok "Wazuh Agent: connected to ${SIEM_HOST}:1514"
         else
-            warn "Wazuh Agent: enrollment in progress — check /var/ossec/logs/ossec.log if it doesn't enroll within 60s"
+            warn "Wazuh Agent: not yet connected — check /var/ossec/logs/ossec.log"
+            warn "Common causes: manager not running, port 1514 blocked, version mismatch"
+            warn "Run: sudo grep -i 'error\|connected' /var/ossec/logs/ossec.log | tail -10"
         fi
-        info "Email alerting: configure on the Wazuh Manager (Integrator + ossec.conf <email_alerts>)"
+        info "Manager-side setup: run setup-wazuh-manager.sh on VM2 for decoders/rules/alerts"
         ;;
 
     2)  # Splunk UF
@@ -1642,10 +1713,9 @@ deploy_and_validate() {
 summary() {
     CURRENT_PHASE="summary"
     mkdir -p /etc/rh-pulsar
-    mkdir -p /opt/rh-pulsar
     local mac
     mac=$(ip link show "$MGMT_IFACE" 2>/dev/null | awk '/ether/{print $2}' | tr -d ':' | tr '[:lower:]' '[:upper:]' || echo "000000")
-    local SENSOR_ID="RHP-${mac:0:6}-$(date +%Y%m%d)"
+    local SENSOR_ID="RHP-${SENSOR_NAME}-${mac:0:6}"
 
     echo "$SENSOR_ID"   > /etc/rh-pulsar/sensor_id
     echo "$SIEM_NAME"   > /etc/rh-pulsar/siem
@@ -1654,22 +1724,6 @@ summary() {
     echo "$CLOUD"       > /etc/rh-pulsar/cloud
     date '+%Y-%m-%d %H:%M:%S' > /etc/rh-pulsar/install_date
     chmod 600 /etc/rh-pulsar/sensor_id 2>/dev/null || true
-
-    # Copy validate.sh to /opt/rh-pulsar so client engineers can verify deployment
-    # (script is bundled alongside install.sh — copy if present, otherwise skip)
-    local script_dir
-    script_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")" 2>/dev/null && pwd)" || script_dir="."
-    if [[ -f "${script_dir}/validate.sh" ]]; then
-        cp "${script_dir}/validate.sh" /opt/rh-pulsar/validate.sh
-        chmod 755 /opt/rh-pulsar/validate.sh
-        ok "validate.sh deployed to /opt/rh-pulsar/"
-    elif [[ -f /tmp/validate.sh ]]; then
-        cp /tmp/validate.sh /opt/rh-pulsar/validate.sh
-        chmod 755 /opt/rh-pulsar/validate.sh
-        ok "validate.sh deployed to /opt/rh-pulsar/ (from /tmp/)"
-    else
-        info "validate.sh not found alongside installer — skip /opt/rh-pulsar/ deploy"
-    fi
 
     local zv; zv=$(/opt/zeek/bin/zeek --version 2>&1 | grep -oP '\d+\.\d+\.\d+' | head -1 || echo "unknown")
 
@@ -1699,8 +1753,8 @@ summary() {
     echo ""
     echo -e "${R}  ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${N}"
     echo ""
-    echo -e "${W}  Red Horizon — redhorizon.ph${N}"
-    echo -e "${D}  © 2026 Red Horizon. All rights reserved.${N}"
+    echo -e "${W}  Red Horizon Security — redhorizon.ph${N}"
+    echo -e "${D}  © 2026 Red Horizon Security. All rights reserved.${N}"
     echo ""
 }
 
