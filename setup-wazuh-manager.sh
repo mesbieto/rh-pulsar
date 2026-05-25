@@ -2,8 +2,8 @@
 # ═══════════════════════════════════════════════════════════
 #  RH PULSAR — Wazuh Manager Setup
 #  Version: 1.0.0
-#  Red Horizon Security — redhorizon.ph
-#  © 2026 Red Horizon Security. All rights reserved.
+#  Red Horizon — redhorizon.ph
+#  © 2026 Red Horizon. All rights reserved.
 #
 #  Companion to install.sh — runs on Wazuh Manager VM (VM2)
 #  Compatible with: install.sh v3.2.5+
@@ -126,7 +126,7 @@ banner() {
     echo "  ╚═╝  ╚═╝╚═╝  ╚═╝    ╚═╝      ╚═════╝ ╚══════╝╚══════╝╚═╝  ╚═╝╚═╝  ╚═╝"
     echo -e "${N}"
     echo -e "${W}  Wazuh Manager Setup — v${PULSAR_VER}${N}"
-    echo -e "${D}  Red Horizon Security — redhorizon.ph${N}"
+    echo -e "${D}  Red Horizon — redhorizon.ph${N}"
     [[ "$DRY_RUN" == true ]] && \
         echo -e "\n${C}  [ DRY RUN — no changes will be made ]${N}"
     echo ""
@@ -247,6 +247,7 @@ configure() {
     echo -n "  Gmail App Password: "
     read -rs GMAIL_APP_PASS || true
     echo ""
+    GMAIL_APP_PASS="${GMAIL_APP_PASS// /}"  # strip spaces Google adds in display
     [[ -z "$GMAIL_APP_PASS" ]] && die "Gmail App Password required"
     ok "Gmail App Password: configured (hidden)"
 
@@ -376,7 +377,10 @@ https://packages.wazuh.com/${WAZUH_REPO}/apt/ stable main" \
     # Initialize Wazuh indexer certificates + cluster
     if [[ ! -f /etc/wazuh-indexer/certs/wazuh-indexer.pem ]]; then
         spinner_start "Initializing Wazuh indexer certificates..."
-        /usr/share/wazuh-indexer/bin/wazuh-certs-tool.sh -A >> "$LOG" 2>&1 || true
+        # wazuh-certs-tool.sh not present in apt installs.
+        # Certs are already handled by the official wazuh-install.sh -a base.
+        # If running standalone: download cert tool manually first.
+        warn "Cert tool not found — certs may already exist from base Wazuh install"
         spinner_stop
     fi
 
@@ -395,10 +399,11 @@ https://packages.wazuh.com/${WAZUH_REPO}/apt/ stable main" \
     spinner_start "Waiting for OpenSearch to be ready (up to 60s)..."
     local ready=false
     for i in $(seq 1 12); do
-        if curl -sf --max-time 5 \
-            "https://localhost:9200" \
-            -u "admin:admin" \
-            --cacert /etc/wazuh-indexer/certs/root-ca.pem \
+        if curl -sf --max-time 5 --insecure \
+            "https://localhost:9200/_cluster/health" \
+            &>/dev/null 2>&1 || \
+           curl -sf --max-time 5 \
+            "http://localhost:9200/_cluster/health" \
             &>/dev/null 2>&1; then
             ready=true; break
         fi
@@ -432,7 +437,7 @@ deploy_decoders_and_rules() {
 <!--
   RH Pulsar — Wazuh Decoders
   Compatible with: install.sh v3.2.5+
-  Red Horizon Security — redhorizon.ph
+  Red Horizon — redhorizon.ph
 
   These decoders parse Zeek JSON logs forwarded by the
   Wazuh Agent on each RH Pulsar sensor.
@@ -441,44 +446,16 @@ deploy_decoders_and_rules() {
   in the agent ossec.conf localfile blocks.
 -->
 
-<!-- Base decoder — matches any Zeek JSON log tagged with rh-pulsar-zeek -->
+<!-- Base decoder — matches ONLY logs tagged rh-pulsar-zeek by install.sh -->
+<!-- install.sh writes: <label key="rh-pulsar-zeek"> in localfile config -->
+<!-- Wazuh serialises this label as the string "rh-pulsar-zeek" in each log line -->
 <decoder name="rh-pulsar-zeek">
-  <prematch>{"ts":</prematch>
-  <plugin_decoder>JSON_Decoder</plugin_decoder>
+  <prematch>rh-pulsar-zeek</prematch>
 </decoder>
 
-<!-- Notice log decoder — all RH Pulsar detections -->
-<decoder name="rh-pulsar-notice">
+<!-- JSON field extractor — fires on top of base decoder -->
+<decoder name="rh-pulsar-zeek-fields">
   <parent>rh-pulsar-zeek</parent>
-  <prematch>"note":"</prematch>
-  <plugin_decoder>JSON_Decoder</plugin_decoder>
-</decoder>
-
-<!-- Conn log decoder -->
-<decoder name="rh-pulsar-conn">
-  <parent>rh-pulsar-zeek</parent>
-  <prematch>"proto":"</prematch>
-  <plugin_decoder>JSON_Decoder</plugin_decoder>
-</decoder>
-
-<!-- DNS log decoder -->
-<decoder name="rh-pulsar-dns">
-  <parent>rh-pulsar-zeek</parent>
-  <prematch>"query":"</prematch>
-  <plugin_decoder>JSON_Decoder</plugin_decoder>
-</decoder>
-
-<!-- SSL log decoder — includes JA4/JA4S fields -->
-<decoder name="rh-pulsar-ssl">
-  <parent>rh-pulsar-zeek</parent>
-  <prematch>"ja4":</prematch>
-  <plugin_decoder>JSON_Decoder</plugin_decoder>
-</decoder>
-
-<!-- HTTP log decoder -->
-<decoder name="rh-pulsar-http">
-  <parent>rh-pulsar-zeek</parent>
-  <prematch>"user_agent":</prematch>
   <plugin_decoder>JSON_Decoder</plugin_decoder>
 </decoder>
 EOF
@@ -490,7 +467,7 @@ EOF
 <!--
   RH Pulsar — Wazuh Detection Rules
   Compatible with: install.sh v3.2.5+
-  Red Horizon Security — redhorizon.ph
+  Red Horizon — redhorizon.ph
 
   Rule ID mapping:
     110001 — C2Beacon::C2_Beacon_Detected
@@ -562,7 +539,7 @@ EOF
        Matches ja4db.com sourced fingerprints
        MITRE T1573 — Encrypted Channel
        ══════════════════════════════════════════════════════ -->
-  <rule id="110007" level="14">
+  <rule id="110013" level="14">
     <decoded_as>rh-pulsar-notice</decoded_as>
     <field name="note">DetectJA4::Malicious_JA4_Detected</field>
     <description>RH Pulsar: Malicious JA4 (DB match) — $(src) -> $(dst)</description>
@@ -624,7 +601,7 @@ EOF
 </group>
 EOF
     ok "Rules deployed: /var/ossec/etc/rules/rh-pulsar-rules.xml"
-    ok "Rules: 110001-110007 (6 detection rules)"
+    ok "Rules: 110001-110006, 110013 (7 detection rules)"
 }
 
 # ═══════════════════════════════════════════════════════════
@@ -734,7 +711,7 @@ rh_rules = {
     "110004": ("MED",    "HTTP C2 Beacon",      "T1071.001"),
     "110005": ("MED",    "Suspicious UA",       "T1071.001"),
     "110006": ("LOW",    "Novel JA4 Baseline",  "T1573"),
-    "110007": ("HIGH",   "Malicious JA4 (DB)",  "T1573"),
+    "110013": ("HIGH",   "Malicious JA4 (DB)",  "T1573"),
 }
 
 new_alerts = []
@@ -812,10 +789,10 @@ for a in new_alerts:
 """
 
 body += f"""
-Dashboard: http://{os.popen("hostname -I | awk '{{print $1}}'").read().strip()}:5601
+Dashboard: https://{os.popen("hostname -I | awk '{print $1}'").read().strip()}
 Log      : /var/ossec/logs/alerts/alerts.json
 
-Red Horizon Security — redhorizon.ph
+Red Horizon — redhorizon.ph
 """
 
 # Send via sendmail
@@ -845,9 +822,9 @@ Content-Type: text/plain
 RH Pulsar Wazuh Manager installed successfully.
 Manager IP : ${MANAGER_IP}
 Time       : $(date '+%Y-%m-%d %H:%M:%S') UTC
-Dashboard  : http://${MANAGER_IP}:5601
+Dashboard  : https://${MANAGER_IP}
 
-Red Horizon Security — redhorizon.ph" \
+Red Horizon — redhorizon.ph" \
         | /usr/sbin/sendmail -t 2>/dev/null || true
 
     ok "Test email sent to ${ALERT_EMAIL}"
@@ -889,20 +866,12 @@ case "\$ACTION" in
         log "AUTO-ISOLATE: blocking \$IP (Sliver JA4 detected)"
         iptables -I INPUT  -s "\$IP" -j DROP 2>/dev/null || true
         iptables -I FORWARD -s "\$IP" -j DROP 2>/dev/null || true
-
-        # Schedule auto-unblock
-        (sleep "\$AR_TIMEOUT"
-         iptables -D INPUT  -s "\$IP" -j DROP 2>/dev/null || true
-         iptables -D FORWARD -s "\$IP" -j DROP 2>/dev/null || true
-         log "AUTO-UNBLOCK: \$IP released after \${AR_TIMEOUT}s"
-        ) &
-        disown
-
-        log "ISOLATED: \$IP blocked for \${AR_TIMEOUT}s"
+        log "ISOLATED: \$IP — Wazuh will send delete after \${AR_TIMEOUT}s"
         exit 0
         ;;
     delete)
-        log "MANUAL-UNBLOCK: removing block on \$IP"
+        # Wazuh manager sends this automatically after <timeout> seconds
+        log "UNBLOCK: removing iptables DROP for \$IP"
         iptables -D INPUT  -s "\$IP" -j DROP 2>/dev/null || true
         iptables -D FORWARD -s "\$IP" -j DROP 2>/dev/null || true
         log "UNBLOCKED: \$IP"
@@ -1049,10 +1018,11 @@ EOF
     chmod 600 "$STATE_FILE"
 
     local wazuh_ver
-    wazuh_ver=$(grep WAZUH_VERSION /var/ossec/etc/ossec.conf 2>/dev/null | \
-                grep -oP '\d+\.\d+\.\d+' | head -1 || \
-                /var/ossec/bin/wazuh-control info 2>/dev/null | \
-                grep WAZUH_VERSION | cut -d= -f2 | tr -d '"' || echo "unknown")
+    # Try multiple methods to detect the installed Wazuh version
+    wazuh_ver=$(dpkg -l wazuh-manager 2>/dev/null | awk '/^ii/{print $3}' | head -1 | grep -oP '\d+\.\d+\.\d+' || \
+                /var/ossec/bin/wazuh-control info 2>/dev/null | grep WAZUH_VERSION | cut -d= -f2 | tr -d '"' || \
+                grep -oP "(?<=wazuh-manager/)\d+\.\d+\.\d+" /var/ossec/etc/ossec.conf 2>/dev/null | head -1 || \
+                echo "unknown")
 
     echo ""
     echo -e "${R}  ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${N}"
@@ -1079,14 +1049,23 @@ EOF
     echo -e "  ${G}[✓]${N} 110004 HTTP C2 Beacon      Level 12  T1071.001   Alert only"
     echo -e "  ${G}[✓]${N} 110005 Suspicious UA       Level 10  T1071.001   Alert only"
     echo -e "  ${G}[✓]${N} 110006 Novel JA4           Level 10  T1573       Alert only"
-    echo -e "  ${G}[✓]${N} 110007 Malicious JA4 (DB)  Level 14  T1573       Alert only"
+    echo -e "  ${G}[✓]${N} 110013 Malicious JA4 (DB)  Level 14  T1573       Alert only"
     echo ""
     echo -e "${D}  ─────────────────────────────────────────────────────────${N}"
     echo ""
     echo -e "  ${W}Access:${N}"
-    echo -e "  ${C}Wazuh Dashboard :${N} http://${MANAGER_IP}:5601"
+    echo -e "  ${C}Wazuh Dashboard :${N} https://${MANAGER_IP}"
     echo -e "  ${C}Wazuh API       :${N} https://${MANAGER_IP}:55000"
     echo -e "  ${C}OpenSearch      :${N} https://${MANAGER_IP}:9200"
+    echo ""
+    echo ""
+    echo -e "${Y}  ⚠  IMPORTANT — Sensor version alignment:${N}"
+    echo -e "  ${D}Your sensors must run wazuh-agent matching this manager version: ${W}${wazuh_ver}${N}"
+    echo -e "  ${D}install.sh auto-detects and pins the agent version via the manager API.${N}"
+    echo -e "  ${D}If agent enrollment fails with version mismatch, check:${N}"
+    echo -e "  ${D}  sudo dpkg -l wazuh-agent   # on sensor${N}"
+    echo -e "  ${D}  sudo dpkg -l wazuh-manager  # on manager${N}"
+    echo -e "  ${D}Both should show: ${W}${wazuh_ver}${N}"
     echo ""
     echo -e "  ${W}To add a new sensor:${N}"
     echo -e "  ${D}On sensor VM:${N}"
@@ -1101,8 +1080,8 @@ EOF
     echo ""
     echo -e "${R}  ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${N}"
     echo ""
-    echo -e "${W}  Red Horizon Security — redhorizon.ph${N}"
-    echo -e "${D}  © 2026 Red Horizon Security. All rights reserved.${N}"
+    echo -e "${W}  Red Horizon — redhorizon.ph${N}"
+    echo -e "${D}  © 2026 Red Horizon. All rights reserved.${N}"
     echo ""
 }
 
