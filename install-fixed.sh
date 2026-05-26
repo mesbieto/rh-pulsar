@@ -767,63 +767,49 @@ EOF
     fi
 
     # ── ja4-baseline.zeek — Tier 2 environment learning ─────────
+    # NOTE: Uses in-memory baseline only (no readfile — Zeek 8.x removed it)
+    # Baseline resets on Zeek restart — acceptable for v1
     cat > "$SITE/ja4-baseline.zeek" << 'EOF'
 # RH Pulsar — JA4 Environment Baseline (Tier 2 anomaly detection)
 # Rule 110006 — MITRE T1573 / behavioral
 #
-# Phase 1: For 7 days after sensor deploy, observe and count JA4 sightings.
-# Phase 2: After 7 days, fingerprints with >=3 sightings are "known-good".
-# Phase 3: Alert on any JA4 not in the known set, not in malicious sets either.
+# Phase 1 (days 1-7): observe TLS fingerprints, build known-good set
+# Phase 2 (day 8+):   alert on any fingerprint not in known-good set
 #
-# Persisted to disk so the baseline survives Zeek restarts.
-@load ./detect-ja4
+# Note: Baseline is in-memory — resets on Zeek restart (acceptable for v1)
+# Zeek 8.x removed readfile() — disk persistence planned for v3.3
 module JA4Baseline;
 export {
     redef enum Notice::Type += { Novel_JA4_Observed };
-    global learning_period: interval = 7day;
-    global sightings_threshold: count = 3;
-    global suppress_for: interval = 24hr;
-    global baseline_file: string = "/opt/zeek/share/zeek/site/ja4-baseline.dat";
-    global baseline_started: time = current_time();
+    global learning_period:      interval = 7day;
+    global sightings_threshold:  count    = 3;
+    global novel_alert_threshold: count   = 2;
+    global suppress_for:         interval = 24hr;
 }
-# Sightings counter — table persists via &write_expire and external file
+global baseline_started: time = current_time();
 global ja4_sightings: table[string] of count &create_expire=30day &default=0;
-global ja4_known: set[string];
-# Load baseline on startup (if file exists)
-event zeek_init() {
-    if (file_size(baseline_file) > 0) {
-        local f = open_for_append("/dev/null");  # noop, just to keep Zeek happy
-        when (T) {
-            local data = readfile(baseline_file);
-            for (line in data) {
-                if (line == "" || /^#/ in line) next;
-                add ja4_known[line];
-            }
-        }
-    }
-}
+global ja4_known: set[string] &create_expire=30day;
+
 function in_learning_period(): bool {
     return (current_time() - baseline_started) < learning_period;
 }
+
 event ssl_established(c: connection) &priority=4 {
     if (!c?$ssl) return;
     if (!c$ssl?$ja4 || c$ssl$ja4 == "") return;
     local j4 = c$ssl$ja4;
-    # Don't double-alert — known-malicious are handled by detect-ja4.zeek
     if (j4 in DetectJA4::malicious_ja4_manual) return;
     if (j4 in DetectJA4::malicious_ja4_db) return;
+
     if (in_learning_period()) {
-        # Learning phase — count sightings, promote to known after threshold
-        ja4_sightings[j4] += 1;
+        ja4_sightings[j4] = ja4_sightings[j4] + 1;
         if (ja4_sightings[j4] >= sightings_threshold && j4 !in ja4_known) {
             add ja4_known[j4];
         }
     } else {
-        # Detection phase — alert on novel fingerprints
         if (j4 !in ja4_known) {
-            ja4_sightings[j4] += 1;
-            # Require multiple sightings even in detection mode to suppress noise
-            if (ja4_sightings[j4] >= 2) {
+            ja4_sightings[j4] = ja4_sightings[j4] + 1;
+            if (ja4_sightings[j4] >= novel_alert_threshold) {
                 NOTICE([$note=Novel_JA4_Observed,
                         $msg=fmt("Novel JA4 (not in baseline or DB): %s -> %s JA4=%s",
                                  c$id$orig_h, c$id$resp_h, j4),
@@ -1015,27 +1001,53 @@ TARGET_FRAMEWORKS=(
     "posh c2"
 )
 
-# ── Download with retry ────────────────────────────────────
-log "Fetching ja4db.com..."
-if ! curl -fsSL --connect-timeout 10 --max-time 60 --retry 3 --retry-delay 5 \
-        -A "RH-Pulsar/3.1.0" \
-        "$API_URL" -o "$TMP_JSON"; then
-    log "ERROR: Download failed — keeping previous DB (if any)"
-    echo "last_status=download_failed" > "$STATE_FILE"
-    echo "last_attempt=$(date '+%Y-%m-%d %H:%M:%S')" >> "$STATE_FILE"
-    exit 1
+# ── Download with fallback sources ────────────────────────
+# Primary: ja4db.com API
+# Fallback 1: GitHub mirror (community maintained)
+# Fallback 2: Use cached/previous DB if available
+
+DOWNLOAD_OK=false
+
+log "Fetching ja4db.com (primary source)..."
+if curl -fsSL --connect-timeout 10 --max-time 60 --retry 2 --retry-delay 5 \
+        -A "RH-Pulsar/3.2.5" \
+        "$API_URL" -o "$TMP_JSON" 2>/dev/null; then
+    if jq -e 'type=="array"' "$TMP_JSON" >/dev/null 2>&1; then
+        DOWNLOAD_OK=true
+        log "ja4db.com: success"
+    fi
 fi
 
-# Validate JSON
-if ! jq -e 'type=="array"' "$TMP_JSON" >/dev/null 2>&1; then
-    log "ERROR: Response is not a JSON array — DB corrupted upstream?"
-    echo "last_status=invalid_response" > "$STATE_FILE"
-    echo "last_attempt=$(date '+%Y-%m-%d %H:%M:%S')" >> "$STATE_FILE"
-    exit 1
+if [[ "$DOWNLOAD_OK" == false ]]; then
+    log "ja4db.com unavailable — trying GitHub mirror..."
+    GITHUB_URL="https://raw.githubusercontent.com/FoxIO-LLC/ja4/main/technical_details/fingerprints.json"
+    if curl -fsSL --connect-timeout 10 --max-time 60 \
+            -A "RH-Pulsar/3.2.5" \
+            "$GITHUB_URL" -o "$TMP_JSON" 2>/dev/null; then
+        if jq -e 'type=="array" or type=="object"' "$TMP_JSON" >/dev/null 2>&1; then
+            DOWNLOAD_OK=true
+            log "GitHub mirror: success"
+        fi
+    fi
 fi
 
-TOTAL=$(jq 'length' "$TMP_JSON")
-log "Downloaded ${TOTAL} fingerprints from ja4db.com"
+if [[ "$DOWNLOAD_OK" == false ]]; then
+    # Check if we have a previous DB — use it rather than wiping
+    if [[ -f "$OUT_FILE" ]] && grep -q "redef malicious_ja4_db" "$OUT_FILE" 2>/dev/null; then
+        log "All sources unavailable — keeping previous DB"
+        echo "last_status=kept_previous" > "$STATE_FILE"
+        echo "last_attempt=$(date '+%Y-%m-%d %H:%M:%S')" >> "$STATE_FILE"
+        exit 0
+    else
+        log "ERROR: All sources unavailable and no previous DB — manual fingerprints still active"
+        echo "last_status=all_sources_failed" > "$STATE_FILE"
+        echo "last_attempt=$(date '+%Y-%m-%d %H:%M:%S')" >> "$STATE_FILE"
+        exit 1
+    fi
+fi
+
+TOTAL=$(jq 'length' "$TMP_JSON" 2>/dev/null || echo "unknown")
+log "Downloaded ${TOTAL} fingerprints"
 
 # ── Filter for target C2 frameworks ────────────────────────
 # Build a jq regex from TARGET_FRAMEWORKS
@@ -1263,13 +1275,38 @@ install_forwarder() {
             installed_wazuh_ver=$(dpkg -l wazuh-agent 2>/dev/null | awk '/^ii/{print $3}' | head -1 || echo "unknown")
             ok "Wazuh Agent already installed (${installed_wazuh_ver}) — reconfiguring"
         else
-            # Pin agent version to match manager version — prevents version mismatch enrollment failure
+            # Pin agent version to match manager — prevents enrollment failure
+            # Try 3 methods in order:
+            # 1. RH Pulsar version file (fastest — set by setup-wazuh-manager.sh)
+            # 2. Wazuh API (works if manager already running)
+            # 3. apt-cache (works if same repo, no manager contact needed)
             local manager_ver=""
             spinner_start "Detecting Wazuh Manager version..."
-            manager_ver=$(curl -sk --max-time 5 \
-                "https://${SIEM_HOST}:55000/" 2>/dev/null | \
-                python3 -c "import sys,json; d=json.load(sys.stdin); print(d.get('data',{}).get('api_version',''))" \
+
+            # Method 1 — RH Pulsar version file
+            manager_ver=$(curl -sf --max-time 3 \
+                "http://${SIEM_HOST}/var/ossec/etc/rh-pulsar-wazuh-version.txt" \
                 2>/dev/null || echo "")
+
+            # Method 2 — Wazuh API
+            if [[ -z "$manager_ver" ]]; then
+                manager_ver=$(curl -sk --max-time 5 \
+                    "https://${SIEM_HOST}:55000/" 2>/dev/null | \
+                    python3 -c "import sys,json; d=json.load(sys.stdin); \
+                    print(d.get('data',{}).get('api_version',''))" \
+                    2>/dev/null || echo "")
+            fi
+
+            # Method 3 — SSH query (if key auth available)
+            if [[ -z "$manager_ver" ]]; then
+                manager_ver=$(ssh -o StrictHostKeyChecking=no \
+                    -o ConnectTimeout=3 \
+                    -o BatchMode=yes \
+                    "root@${SIEM_HOST}" \
+                    "dpkg -l wazuh-manager 2>/dev/null | awk '/^ii/{print \$3}' | grep -oP '^\d+\.\d+\.\d+'" \
+                    2>/dev/null || echo "")
+            fi
+
             spinner_stop
 
             if [[ -n "$manager_ver" ]]; then
@@ -1345,6 +1382,18 @@ zl = sys.argv[1]
 path = "/var/ossec/etc/ossec.conf"
 with open(path) as f:
     content = f.read()
+
+# Step 1 — merge multiple ossec_config blocks into one
+# Wazuh Agent default config has multiple <ossec_config> blocks
+parts = content.split("</ossec_config>")
+if len(parts) > 2:
+    merged = parts[0]
+    for part in parts[1:-1]:
+        part = re.sub(r'\s*<ossec_config>\s*', '\n', part)
+        merged += part
+    content = merged.rstrip() + "\n\n</ossec_config>\n"
+
+# Step 2 — build localfile blocks
 blocks = ""
 for l in ["notice", "conn", "dns", "ssl", "http"]:
     blocks += f"""
@@ -1353,12 +1402,12 @@ for l in ["notice", "conn", "dns", "ssl", "http"]:
     <location>{zl}/{l}.log</location>
     <label key="rh-pulsar-zeek">{l}</label>
   </localfile>"""
-# Insert before LAST </ossec_config> only
-new_content = re.sub(r'\s*</ossec_config>\s*$',
-                     blocks + "\n\n</ossec_config>\n",
-                     content, count=1, flags=re.MULTILINE)
+
+# Step 3 — insert before the single closing tag
+content = content.replace("</ossec_config>", blocks + "\n\n</ossec_config>", 1)
+
 with open(path, "w") as f:
-    f.write(new_content)
+    f.write(content)
 PYEOF
             ok "Wazuh Agent: localfile blocks added (5 Zeek log paths)"
         else
